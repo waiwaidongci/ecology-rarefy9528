@@ -29,6 +29,13 @@ def seed():
      t=Transect(survey_id=survey.id,reference=reference,name=['林缘','溪边','草地'][i%3]+f'样线{i+1:02d}',habitat=['阔叶林缘','溪边灌丛','草地边界'][i%3]);db.add(t);db.flush();db.add_all([SpeciesCount(transect_id=t.id,species=s,count=int(c)) for s,c in zip(SPECIES,counts)])
    db.commit()
   if not db.scalar(select(DiversityRun).where(DiversityRun.name=='秋季共同努力量研究')):
-   survey=db.scalar(select(Survey).where(Survey.name=='秋季样线调查'));data=list_transects(db,survey.id);admin=db.scalar(select(User).where(User.role=='admin'));config={'transect_ids':[t['id'] for t in data],'m':100,'bootstrap':200,'seed':20261114};result=analyze(row(survey),data,config);run=DiversityRun(survey_id=survey.id,name='秋季共同努力量研究',config=config,result=result,status='succeeded',creator_id=admin.id);db.add(run);db.flush();db.add(ConservationNote(run_id=run.id,name='林缘稀有种复查草案',transect_ids=[t['id'] for t in result['transects'] if t['status']=='eligible'][:2],observation='相同m=100下比较期望物种数；原N的Shannon/Simpson仅描述，不按原始物种数排优。',suggested_action='复查低计数物种和漏检可能，下一调查期保持样线协议。',creator_id=admin.id));db.add(AuditLog(actor='seed',action='demo.created',detail={'seed':149,'count_rows':1296}));db.commit()
+   from src.models import RunAttempt
+   from src.services import publication
+   survey=db.scalar(select(Survey).where(Survey.name=='秋季样线调查'));data=list_transects(db,survey.id);admin=db.scalar(select(User).where(User.role=='admin'));config={'transect_ids':[t['id'] for t in data],'m':100,'bootstrap':200,'seed':20261114};result=analyze(row(survey),data,config)
+   run=DiversityRun(survey_id=survey.id,name='秋季共同努力量研究',config=config,status='queued',creator_id=admin.id,request_key='seed-autumn-common-m100',attempt_seq=1)
+   db.add(run);db.flush();attempt=RunAttempt(run_id=run.id,attempt_no=1,status='queued',token='seed-attempt',reason='seed');db.add(attempt);db.flush();run.current_attempt_id=attempt.id;db.commit()
+   publication.claim_attempt(db,run.id,attempt.id,'seed');outcome=publication.publish_attempt(db,run.id,attempt.id,result)
+   if not outcome['ok']:raise RuntimeError('seed publication failed')
+   db.add(ConservationNote(run_id=run.id,name='林缘稀有种复查草案',transect_ids=[t['id'] for t in result['transects'] if t['status']=='eligible'][:2],observation='相同m=100下比较期望物种数；原N的Shannon/Simpson仅描述，不按原始物种数排优。',suggested_action='复查低计数物种和漏检可能，下一调查期保持样线协议。',creator_id=admin.id));db.add(AuditLog(actor='seed',action='demo.created',detail={'seed':149,'count_rows':1296}));db.commit()
   counts={t.__tablename__:db.scalar(select(func.count()).select_from(t)) for t in [User,Survey,Transect,SpeciesCount,DiversityRun,ConservationNote]};print(json.dumps(counts));return counts
 if __name__=='__main__':seed()

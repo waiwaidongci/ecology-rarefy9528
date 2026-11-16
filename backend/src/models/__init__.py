@@ -4,4 +4,5 @@ from .survey import Survey
 from .transect import Transect
 from .count import SpeciesCount
 from .run import DiversityRun
+from .attempt import RunAttempt
 from .note import ConservationNote

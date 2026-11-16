@@ -4,3 +4,5 @@ REDIS_URL=os.getenv('REDIS_URL','redis://redis:6379/0')
 JWT_SECRET=os.environ['JWT_SECRET']
 SEED_DEMO=os.getenv('SEED_DEMO','true').lower()=='true'
 ARTIFACT_DIR=os.getenv('ARTIFACT_DIR','/artifacts')
+RUN_LEASE_SECONDS=int(os.getenv('RUN_LEASE_SECONDS','120'))
+ARTIFACT_GRACE_SECONDS=int(os.getenv('ARTIFACT_GRACE_SECONDS','86400'))

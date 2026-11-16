@@ -36,7 +36,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 五个核心实体Survey、Transect、SpeciesCount、DiversityRun、ConservationNote贯穿表/model/schema/service/route/API/store/UI。六页为研究首页、调查与样线、共同量配置、多样性结果、观察建议、田野留痕。RarefactionCurve、DiversitySummary、RunTable跨页复用，同时有共享Table/Badge/Notice/Empty。
 
-调查期内样线reference唯一，样线内species唯一并有数据库非负CHECK；API对重复物种行明确422，要求上游先汇总，不静默覆盖。S01—S24为允许物种；未知编码、负数、非整数计数拒绝，未提供物种按零计算。单种每行上限100000、样线总N上限2400000；研究最多选择同一期30条样线。支持新调查期和JSON计数录入，不提供CSV解析器。
+调查期内样线reference唯一，样线内species唯一并有数据库非负CHECK；API对重复物种行明确422，要求上游先汇总，不静默覆盖。S01—S24为允许物种；未知编码、负数、非整数计数拒绝，未提供物种按零计算。单种每行上限100000、样线总N上限2400000；研究最多选择同一期30条样线。支持新调查期和JSON计数录入，不提供CSV解析器。提交研究需客户端幂等键`request_key`（8–64位字母数字/下划线/连字符），重复提交不新建研究。
 
 ## 算法口径
 
@@ -52,6 +52,18 @@ docker compose exec -T backend python -m scripts.seed_demo
 
 失败态包括未知物种、负/非整数/非有限计数、重复物种、跨调查期、重复样线、共同m超非空最小N、所有样线为空、非法bootstrap和seed。观察差异不证明保护动作有因果效果，田野协议与漏检需要另行复核。
 
+## 发布单元：尝试、归档与恢复
+
+一次研究是一个稳定的发布槽，每次执行是`run_attempts`里的一条尝试（编号递增）。**结果、完成状态、发布尝试和导出依据（归档路径、SHA-256、字节数、发布时间）在同一事务提交**；归档先写临时文件、fsync、再原子改名，然后才提交。若提交前中断，文件不成为任何记录的引用，只是无主文件。
+
+- **仅当前有效尝试可发布**：guarded UPDATE要求`current_attempt_id`匹配、状态`running`、租约未过期，行数不为1即拒绝。旧尝试的迟到结果被标`superseded`（页面显示"迟到·未采用"），其刚写的归档当场删除，库内结果与归档SHA-256保持不变，另记`diversity.late_discarded`留痕。
+- **中断可接管**：worker持租约心跳（`RUN_LEASE_SECONDS`，默认120秒）。worker失联后租约过期，`POST /runs/recover`把运行标为`interrupted`、尝试结束；`POST /runs/{id}/attempts`由负责人接管，新增尝试并用`recovered_from_attempt_id`串起链路，旧尝试不会复活。失败研究用`POST /runs/{id}/retry`重试。已发布研究不可接管（409）。
+- **重复任务不增加归档**：worker只认`(run_id, attempt_id)`，重复投递拿不到`queued→running`的原子声明即返回`duplicate`，不再计算也不再写文件。提交侧`request_key`唯一：同键同参返回既有研究（HTTP 200），不新建研究/尝试/归档；同键不同参数返回409。
+- **导出以发布为依据**：CSV仅对已发布研究导出，导出前重新核对归档（存在性、SHA-256、字节数、指纹、发布尝试状态），任何不一致返回409而不发数字；导出响应头携带`X-Publication-Attempt`与`X-Archive-SHA256`。`GET /runs/{id}/verify`返回同一份核对报告。
+- **清理不误删被引用文件**：`POST /runs/maintenance/sweep?dry_run=true`扫描共享卷，只删除未被任何`artifact_path`引用且早于`ARTIFACT_GRACE_SECONDS`（默认86400秒）的文件；引用判定来自数据库而非文件名或目录顺序，宽限期覆盖"改名完成、事务未提交"的短暂窗口。归档文件名含尝试号（`diversity-{run}-a{n}.json`），迟到尝试物理上也无法覆盖新尝试的文件。
+
+研究页"发布单元 / 尝试与恢复"展示发布尝试、归档名/SHA-256/字节数与发布时间、每次尝试的执行者与起止时间/说明、中断与接管记录，并提供接管、重试、扫描失联、核对归档入口；研究索引显示尝试数与发布尝试。迁移见`migrations/002_publication_unit.sql`，启动时对旧库做窄范围幂等补列。后端口径测试`backend/tests/`（14项）与场景脚本在批次根`test-artifacts/gb-0014`；场景覆盖归档后中断、接管后迟到写回、重复投递与提交、清理并发。
+
 ## 工程与开发
 
 | 层 | 技术 |
@@ -62,7 +74,7 @@ docker compose exec -T backend python -m scripts.seed_demo
 | 数据和队列 | PostgreSQL16 / Redis7 / Celery5.4 + Kombu5.4.2 |
 | 认证 | PBKDF2-SHA256 210000轮 / JWT HS256 8小时 / 后端角色鉴权 |
 
-恰好frontend/backend/worker/db/redis五服务，全部健康探针/健康依赖；Nginx使用127.0.0.1探针，worker使用定向Celery ping。db-data/redis-data/artifacts命名卷分别保存数据库、队列与共享计算JSON。Nginx剥离/api/前缀，API不重复前缀。Kombu锁定5.4.2以兼容Celery5.4 Redis依赖。
+恰好frontend/backend/worker/db/redis五服务，全部健康探针/健康依赖；Nginx使用127.0.0.1探针，worker使用定向Celery ping。db-data/redis-data/artifacts命名卷分别保存数据库、队列与共享计算JSON（发布归档与未引用文件同卷，清理按数据库引用判定）。Nginx剥离/api/前缀，API不重复前缀。Kombu锁定5.4.2以兼容Celery5.4 Redis依赖。
 
 环境变量见.env.example：COMPOSE_PROJECT_NAME/FRONTEND_PORT/BACKEND_PORT/DB_PORT隔离项目与端口；POSTGRES_DB/USER/PASSWORD配置库；JWT_SECRET签名；SEED_DEMO控制自动数据。演示口令只用于本机，部署时替换环境变量。
 
